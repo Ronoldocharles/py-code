@@ -1,0 +1,221 @@
+import pymysql.cursors
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from app import random_generator
+import json
+
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'helloworld'
+connection = pymysql.connect(
+    host="localhost",
+    user="root",
+    passwd="Ronoldocharles1@",
+    port=3306,
+    db="mydb",
+    cursorclass=pymysql.cursors.DictCursor)
+cursor = connection.cursor()
+
+def getJson():
+    with open('data.json') as f:
+        file = json.load(f)
+        return file['bank']
+
+
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+
+@app.route('/register', methods=['POST', 'GET'])
+def register():
+    if request.method == "POST":
+        global rs
+        name = request.form.get('name')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        password1 = request.form.get('password1')
+        if password != password1:
+            flash('passwords do not match')
+            return redirect(url_for('register'))
+        cursor.execute('select * from user where username=%s',(name,))
+        rs = cursor.fetchone()
+        print(rs)
+        if rs:
+            flash('Account already Exists')
+            return redirect(url_for('register'))
+        else:
+            cursor.execute("insert into user (username,email,password) values(%s,%s,%s)",(name,email,password))
+            connection.commit()
+            flash('Registered Successfully! Please login')
+            return redirect(url_for('login'))
+    else:
+        return render_template('register.html')
+
+
+def agent_session_refresh():
+    cursor.execute(
+        "select * from user where user.assigned_agent=%s and user.review_status=0", (session['agent']['username'],))
+
+    session['customer'] = cursor.fetchall()
+    print(session['customer'])
+
+
+def user_session_refresh():
+    sql = "select * from user  where user.username=%s"
+    cursor.execute(sql, (session['customer']['username'],))
+    session['customer'] = cursor.fetchone()
+    print(session['customer'])
+
+def admin_refresh_session():
+    cursor.execute(
+        "select * from user where assigned_agent=NULL or review_status=0")
+    session['customer'] = cursor.fetchall()
+    cursor.execute("select * from agent")
+    session['agent'] = cursor.fetchall()
+    print(session['customer'], session['agent'])
+
+
+@app.route('/login', methods=['POST', 'GET'])
+def login():
+    if request.method == "POST":
+        name = request.form['name']
+        password = request.form['password']
+        values = (name, password)
+        sql = "select * from user where user.username=%s and user.password=%s"
+        cursor.execute(sql, values)
+        rs = cursor.fetchone()
+        if rs:
+            session['logged_in'] = True
+            session['role'] = 'user'
+            session['customer'] = rs
+            print(rs)
+            return redirect(url_for('dashboard'))
+        sql = "select * from agent where username=%s and password=%s"
+        cursor.execute(sql, values)
+        rs = cursor.fetchone()
+        if rs:
+            session['logged_in'] = True
+            session['agent'] = rs
+            session['role'] = 'agent'
+            session['bank'] = getJson()
+            agent_session_refresh()
+            print(
+                f'''session role:{session['role']}\n
+                agent name:{session['agent']['username']}\n
+                all customers:{session['customer']}\n
+                all_agents:{session['agent']}\n
+                bank detains:{session['bank']}''')
+            return redirect(url_for('dashboard'))
+        sql = "select * from admin where username=%s and password=%s"
+        cursor.execute(sql, values)
+        rs = cursor.fetchone()
+        if rs:
+            session['role'] = 'admin'
+            session['logged_in'] = True
+            admin_refresh_session()
+
+            print(f'''role:{session['role']}\n
+            all customers:{session['customer']}\n
+            all agents: {session['agent']}''')
+            return redirect(url_for('dashboard'))
+        else:
+            flash('UID/Password is incorrect')
+            return redirect(url_for('login'))
+    else:
+        return render_template('login.html')
+
+
+@app.route('/dashboard', methods=['POST', 'GET'])
+def dashboard():
+    if session['logged_in'] and session['role'] == 'agent':
+        agent_session_refresh()
+    elif session['logged_in'] and session['role'] == 'user':
+        user_session_refresh()
+    elif session['logged_in'] and session['role'] == 'admin':
+        admin_refresh_session()
+    else:
+        flash('Please log in first')
+        return redirect(url_for('login'))
+    return render_template('dashboard.html')
+
+
+@app.route('/success', methods=['POST', 'GET'])
+def success():
+    if request.method == "POST":
+        ticket = session['ticket'] = random_generator.alphanumeric()
+        query = request.form['query']
+        print(ticket, query, session['customer']['username'])
+        print(session['customer']['username'])
+        sql = "UPDATE user SET QUERY=%s,TICKET=%s,REVIEW_STATUS='0',assigned_agent=NULL,reply=NULL where USERNAME=%s"
+        try:
+            cursor.execute(
+                sql, (query, session['ticket'], session['customer']['username']))
+            connection.commit()
+            flash(f'Success ! Your Ticket id is {ticket}')
+        except:
+            flash('Error Submitting your Query')
+            return redirect(url_for('dashboard'))
+        return redirect(url_for('dashboard'))
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('home'))
+
+
+@app.route('/querying', methods=['POST', 'GET'])
+def admin_assign_customer():
+    if request.method == "POST":
+        agents = tuple(request.form.getlist('agent_name'))
+        usernames = tuple(request.form.getlist('customer_name'))
+        emails = tuple(request.form.getlist('email'))
+        print(agents, usernames, emails)
+        combined = zip(agents, usernames, emails)
+        print(combined)
+        for item in combined:
+            if not item[0] == 'none':
+                try:
+                    print(item[0], item[1], item[2])
+                    sql = "update user set assigned_agent=%s where username=%s"
+                    cursor.execute(sql, (item[0], item[1]))
+                except:
+                    flash('Error saving allotments')
+                    return redirect(url_for('dashboard'))
+                connection.commit()
+                flash('Allotments updated Successfully')
+                return redirect(url_for('dashboard'))
+            else:
+                flash('No changes made')
+                return redirect(url_for('dashboard'))
+    else:
+        flash('Unauthorized !!')
+        return redirect(url_for('home'))
+
+
+@app.route('/executing', methods=['POST', 'GET'])
+def agent_submit_reply():
+    if request.method == 'POST':
+        names = tuple(request.form.getlist('name'))
+        text = tuple(request.form.getlist('text'))
+        emails = tuple(request.form.getlist('email'))
+        combined = zip(names, text, emails)
+        print(combined)
+        for item in combined:
+            if not item[1] == '':
+                try:
+                    sql = "update user set reply=%s,review_status='1' where username=%s"
+                    cursor.execute(sql, (item[1], item[0]))
+                except:
+                    flash('Something went wrong')
+                    return redirect(url_for('dashboard'))
+                connection.commit()
+                flash('Replies sent successfully')
+                return redirect(url_for('dashboard'))
+    else:
+        flash('Unauthorized !')
+        return redirect(url_for('home'))
+
+
+if __name__ == '__main__':
+        app.run(debug=True, host="0.0.0.0", port=5000)
